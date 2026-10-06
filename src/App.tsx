@@ -31,9 +31,18 @@ import {
   useToasts,
 } from "./data";
 import { colorOf, dayKey, dueKey, loadPref, savePref, sortTasks } from "./lib";
+import { useNotificationScheduler } from "./notifications";
 import type { Task } from "./types";
 
-const DEFAULT_PREFS: Prefs = { weekStartsOn: 1, theme: "system", hidden: [], showPreviews: true };
+const DEFAULT_PREFS: Prefs = {
+  weekStartsOn: 1,
+  theme: "system",
+  hidden: [],
+  showPreviews: true,
+  notificationsEnabled: true,
+  defaultReminderMinutes: 10,
+  notificationSound: true,
+};
 
 export function App() {
   const config = useConfig();
@@ -47,6 +56,13 @@ export function App() {
     setPrefsState(p);
     savePref("prefs", p);
   };
+
+  useNotificationScheduler(
+    tasksQ.data,
+    prefs.notificationsEnabled ?? true,
+    prefs.defaultReminderMinutes ?? 10,
+    prefs.notificationSound ?? true,
+  );
   const [today, setToday] = useState(() => dayKey(new Date()));
   const [cursor, setCursor] = useState(() => new Date());
   const [selected, setSelected] = useState(today);

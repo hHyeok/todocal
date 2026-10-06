@@ -3,6 +3,7 @@ import { useState } from "react";
 import { api } from "../api";
 import { keys, toast } from "../data";
 import { colorOf } from "../lib";
+import { getNotificationPermission, isElectron, requestNotificationPermission, sendNotification } from "../notifications";
 import type { AppConfig, Project } from "../types";
 
 export interface Prefs {
@@ -10,6 +11,9 @@ export interface Prefs {
   theme: "system" | "light" | "dark";
   hidden: string[];
   showPreviews: boolean;
+  notificationsEnabled?: boolean;
+  defaultReminderMinutes?: number;
+  notificationSound?: boolean;
 }
 
 interface Props {
@@ -229,6 +233,88 @@ export function Settings({ config, prefs, projects, onPrefs, onClose, onboarding
                   </button>
                 ))}
               </div>
+            </div>
+          </section>
+          <section>
+            <h3>알림 ({isElectron() ? "데스크탑 네이티브" : "브라우저 웹 푸시"})</h3>
+            <div className="row">
+              <span className="row-label">알림 사용</span>
+              <div className="seg">
+                {[true, false].map((v) => (
+                  <button
+                    key={String(v)}
+                    aria-pressed={(prefs.notificationsEnabled ?? true) === v}
+                    onClick={async () => {
+                      if (v && !isElectron() && getNotificationPermission() !== "granted") {
+                        const res = await requestNotificationPermission();
+                        if (res !== "granted") {
+                          toast("브라우저 알림 권한이 필요합니다", { error: true });
+                          return;
+                        }
+                      }
+                      onPrefs({ ...prefs, notificationsEnabled: v });
+                    }}
+                  >
+                    {v ? "사용" : "끄기"}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <div className="row">
+              <span className="row-label">기본 알림 시간</span>
+              <select
+                value={prefs.defaultReminderMinutes ?? 10}
+                onChange={(e) => onPrefs({ ...prefs, defaultReminderMinutes: Number(e.target.value) })}
+              >
+                <option value="0">정각 (0분 전)</option>
+                <option value="5">5분 전</option>
+                <option value="10">10분 전</option>
+                <option value="15">15분 전</option>
+                <option value="30">30분 전</option>
+                <option value="60">1시간 전</option>
+              </select>
+            </div>
+            <div className="row">
+              <span className="row-label">알림 소리 (차임벨)</span>
+              <div className="seg">
+                {[true, false].map((v) => (
+                  <button
+                    key={String(v)}
+                    aria-pressed={(prefs.notificationSound ?? true) === v}
+                    onClick={() => onPrefs({ ...prefs, notificationSound: v })}
+                  >
+                    {v ? "켜기" : "무음"}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <div className="row" style={{ marginTop: "6px" }}>
+              <span className="row-label" style={{ fontSize: "12px", color: "var(--muted)" }}>
+                상태: {isElectron() ? "Electron 윈도우 네이티브 알림" : "브라우저 Notification API"}
+              </span>
+              <button
+                type="button"
+                className="small"
+                onClick={async () => {
+                  if (!isElectron() && getNotificationPermission() !== "granted") {
+                    const res = await requestNotificationPermission();
+                    if (res !== "granted") {
+                      toast("브라우저 알림 권한이 허용되지 않았습니다", { error: true });
+                      return;
+                    }
+                  }
+                  await sendNotification(
+                    "Todocal 테스트 알림",
+                    isElectron()
+                      ? "데스크탑 윈도우 네이티브 알림이 정상 작동 중입니다!"
+                      : "브라우저 웹 알림이 정상 작동 중입니다!",
+                    { sound: prefs.notificationSound ?? true },
+                  );
+                  toast("테스트 알림을 발송했습니다");
+                }}
+              >
+                테스트 알림 발송
+              </button>
             </div>
           </section>
           <section>

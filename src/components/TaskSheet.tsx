@@ -2,6 +2,7 @@ import { addDays, format, nextMonday, parseISO } from "date-fns";
 import { useEffect, useState } from "react";
 import { useAdd, useComplete, useDelete, useMove, useReschedule, useUpdate } from "../data";
 import { colorOf, dayKey, dueKey, dueTime, PRIORITY_COLOR, PRIORITY_LABEL, sortTasks } from "../lib";
+import { getTaskReminder, setTaskReminder } from "../notifications";
 import type { Label, Project, Task } from "../types";
 import { TaskItem } from "./TaskItem";
 
@@ -26,10 +27,13 @@ export function TaskSheet({ task, allTasks, projects, labels, onClose, onOpen }:
   const [desc, setDesc] = useState(task.description);
   const [repeat, setRepeat] = useState(repeatOf(task));
   const [sub, setSub] = useState("");
+  const [reminder, setReminder] = useState<number>(() => getTaskReminder(task.id));
+
   useEffect(() => {
     setContent(task.content);
     setDesc(task.description);
     setRepeat(repeatOf(task));
+    setReminder(getTaskReminder(task.id));
   }, [task.id, task.content, task.description, task.due?.string]);
 
   useEffect(() => {
@@ -170,6 +174,27 @@ export function TaskSheet({ task, allTasks, projects, labels, onClose, onOpen }:
                 {p.inbox_project ? "Inbox" : p.name}
               </option>
             ))}
+          </select>
+        </div>
+
+        <div className="row">
+          <span className="row-label">알림</span>
+          <select
+            value={reminder}
+            onChange={(e) => {
+              const val = Number(e.target.value);
+              setReminder(val);
+              setTaskReminder(task.id, val);
+            }}
+          >
+            <option value="-2">기본 설정 따름</option>
+            <option value="-1">알림 없음</option>
+            <option value="0">정각 (0분 전)</option>
+            <option value="5">5분 전</option>
+            <option value="10">10분 전</option>
+            <option value="15">15분 전</option>
+            <option value="30">30분 전</option>
+            <option value="60">1시간 전</option>
           </select>
         </div>
 
