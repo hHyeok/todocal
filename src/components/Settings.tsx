@@ -24,7 +24,11 @@ interface Props {
 export function Settings({ config, prefs, projects, onPrefs, onClose, onboarding }: Props) {
   const qc = useQueryClient();
   const [todoist, setTodoist] = useState("");
+  const [aiProvider, setAiProvider] = useState<"agy" | "claude" | "gemini">(
+    config.aiProvider !== "none" ? (config.aiProvider as "agy" | "claude" | "gemini") : config.hasAgy ? "agy" : "claude",
+  );
   const [anthropic, setAnthropic] = useState("");
+  const [gemini, setGemini] = useState("");
   const [model, setModel] = useState(config.model);
   const [pass, setPass] = useState(() => {
     try {
@@ -45,10 +49,13 @@ export function Settings({ config, prefs, projects, onPrefs, onClose, onboarding
       await api.saveConfig({
         ...(todoist && { todoistToken: todoist.trim() }),
         ...(anthropic && { anthropicKey: anthropic.trim() }),
+        ...(gemini && { geminiKey: gemini.trim() }),
+        aiProvider,
         ...(model !== config.model && { model }),
       });
       setTodoist("");
       setAnthropic("");
+      setGemini("");
       await qc.invalidateQueries();
       toast("저장했습니다");
       if (!onboarding) onClose?.();
@@ -81,22 +88,105 @@ export function Settings({ config, prefs, projects, onPrefs, onClose, onboarding
             토큰 복사하러 가기 ↗
           </a>
         </label>
+
         <label className="field">
           <span>
-            Anthropic API 키 (AI 지시용, 선택) {config.hasAnthropic && <em className="ok">연결됨</em>}
+            AI 엔진 {config.hasAi && <em className="ok">{config.aiProvider} 연결됨</em>}
           </span>
-          <input
-            type="password"
-            value={anthropic}
-            placeholder={config.hasAnthropic ? "바꿀 때만 입력" : "sk-ant-… 없으면 Todoist 빠른 추가로 동작"}
-            onChange={(e) => setAnthropic(e.target.value)}
-            autoComplete="off"
-          />
+          <div className="seg">
+            <button
+              type="button"
+              aria-pressed={aiProvider === "agy"}
+              onClick={() => {
+                setAiProvider("agy");
+                if (!model || model.startsWith("claude")) setModel("gemini-3.8-flash-low");
+              }}
+            >
+              agy (Antigravity){config.hasAgy ? " ✓" : " (미감지)"}
+            </button>
+            <button
+              type="button"
+              aria-pressed={aiProvider === "claude"}
+              onClick={() => {
+                setAiProvider("claude");
+                if (!model || model.startsWith("gemini")) setModel("claude-opus-5");
+              }}
+            >
+              Claude
+            </button>
+            <button
+              type="button"
+              aria-pressed={aiProvider === "gemini"}
+              onClick={() => {
+                setAiProvider("gemini");
+                if (!model || model.startsWith("claude")) setModel("gemini-2.5-flash");
+              }}
+            >
+              Gemini API
+            </button>
+          </div>
         </label>
-        <label className="field">
-          <span>Claude 모델</span>
-          <input value={model} onChange={(e) => setModel(e.target.value)} />
-        </label>
+
+        {aiProvider === "agy" && (
+          <>
+            <p className="hint">
+              {config.hasAgy
+                ? "로컬에 설치된 Antigravity CLI(agy)를 사용합니다. 별도 API 키 없이 즉시 동작합니다."
+                : "시스템에 agy가 감지되지 않았습니다. agy가 설치되어 있으면 환경변수 PATH를 확인해주세요."}
+            </p>
+            <label className="field">
+              <span>agy 모델</span>
+              <input
+                value={model}
+                placeholder="gemini-3.8-flash-low"
+                onChange={(e) => setModel(e.target.value)}
+              />
+              <span className="hint">추천: gemini-3.8-flash-low (빠름), gemini-3.8-flash-medium, gemini-3.1-pro-high</span>
+            </label>
+          </>
+        )}
+
+        {aiProvider === "claude" && (
+          <>
+            <label className="field">
+              <span>
+                Anthropic API 키 (AI 지시용) {config.hasAnthropic && <em className="ok">연결됨</em>}
+              </span>
+              <input
+                type="password"
+                value={anthropic}
+                placeholder={config.hasAnthropic ? "바꿀 때만 입력" : "sk-ant-…"}
+                onChange={(e) => setAnthropic(e.target.value)}
+                autoComplete="off"
+              />
+            </label>
+            <label className="field">
+              <span>Claude 모델</span>
+              <input value={model} placeholder="claude-opus-5" onChange={(e) => setModel(e.target.value)} />
+            </label>
+          </>
+        )}
+
+        {aiProvider === "gemini" && (
+          <>
+            <label className="field">
+              <span>
+                Gemini API 키 (AI 지시용) {config.hasGemini && <em className="ok">연결됨</em>}
+              </span>
+              <input
+                type="password"
+                value={gemini}
+                placeholder={config.hasGemini ? "바꿀 때만 입력" : "AIzaSy…"}
+                onChange={(e) => setGemini(e.target.value)}
+                autoComplete="off"
+              />
+            </label>
+            <label className="field">
+              <span>Gemini 모델</span>
+              <input value={model} placeholder="gemini-2.5-flash" onChange={(e) => setModel(e.target.value)} />
+            </label>
+          </>
+        )}
         <label className="field">
           <span>서버 패스코드 (원격 접속 시)</span>
           <input type="password" value={pass} onChange={(e) => setPass(e.target.value)} autoComplete="off" />

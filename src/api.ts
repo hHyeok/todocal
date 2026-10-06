@@ -53,8 +53,13 @@ async function paginate<T>(path: string, key: "results" | "items" = "results"): 
 
 export const api = {
   config: () => req<AppConfig>("/api/config"),
-  saveConfig: (body: { todoistToken?: string; anthropicKey?: string; model?: string }) =>
-    req<{ ok: true }>("/api/config", post(body)),
+  saveConfig: (body: {
+    todoistToken?: string;
+    anthropicKey?: string;
+    geminiKey?: string;
+    aiProvider?: "claude" | "agy" | "gemini";
+    model?: string;
+  }) => req<{ ok: true }>("/api/config", post(body)),
 
   tasks: () => paginate<Task>("/tasks"),
   projects: () => paginate<Project>("/projects"),

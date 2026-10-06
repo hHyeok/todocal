@@ -2,7 +2,7 @@ import { format, parseISO } from "date-fns";
 import { ko } from "date-fns/locale";
 import { useState } from "react";
 import { useAdd, useComplete, useReopen, useReschedule } from "../data";
-import { colorOf, sortTasks } from "../lib";
+import { colorOf, loadPref, savePref, sortTasks } from "../lib";
 import type { Project, Task } from "../types";
 import { TaskItem } from "./TaskItem";
 
@@ -22,6 +22,15 @@ export function DayPanel({ day, today, open, done, overdue, projects, onOpen }: 
   const reschedule = useReschedule();
   const [adding, setAdding] = useState<string | null>(null);
   const [showDone, setShowDone] = useState(true);
+  const [overdueCollapsed, setOverdueCollapsed] = useState<boolean>(() => loadPref("overdueCollapsed", false));
+
+  const toggleOverdue = () => {
+    setOverdueCollapsed((prev) => {
+      const next = !prev;
+      savePref("overdueCollapsed", next);
+      return next;
+    });
+  };
 
   const date = parseISO(day);
   const total = open.length + done.length;
@@ -58,26 +67,70 @@ export function DayPanel({ day, today, open, done, overdue, projects, onOpen }: 
       </header>
 
       {day === today && overdue.length > 0 && (
-        <div className="overdue">
-          <span>밀린 할 일 {overdue.length}개</span>
-          <button
-            className="small"
-            onClick={() => overdue.forEach((t) => reschedule.mutate({ task: t, date: today }))}
+        <div className={`overdue${overdueCollapsed ? " collapsed" : ""}`}>
+          <div
+            className="overdue-head"
+            style={{
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+              width: "100%",
+              cursor: "pointer",
+              userSelect: "none",
+            }}
+            onClick={toggleOverdue}
           >
-            모두 오늘로
-          </button>
-          <ul>
-            {overdue.sort(sortTasks).map((t) => (
-              <TaskItem
-                key={t.id}
-                task={t}
-                color={colorOf(projects.find((p) => p.id === t.project_id)?.color)}
-                showDate
-                onToggle={(x) => complete.mutate(x)}
-                onOpen={onOpen}
-              />
-            ))}
-          </ul>
+            <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+              <span
+                style={{
+                  display: "inline-block",
+                  transform: overdueCollapsed ? "rotate(-90deg)" : "rotate(0deg)",
+                  transition: "transform 0.15s ease",
+                  fontSize: "11px",
+                }}
+              >
+                ▼
+              </span>
+              <span>밀린 할 일 {overdue.length}개</span>
+            </div>
+            <div style={{ display: "flex", gap: "6px", alignItems: "center" }}>
+              <button
+                type="button"
+                className="small"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  overdue.forEach((t) => reschedule.mutate({ task: t, date: today }));
+                }}
+              >
+                모두 오늘로
+              </button>
+              <button
+                type="button"
+                className="ghost small"
+                style={{ padding: "2px 6px", fontSize: "11px", color: "var(--sun)" }}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  toggleOverdue();
+                }}
+              >
+                {overdueCollapsed ? "펼치기" : "접기"}
+              </button>
+            </div>
+          </div>
+          {!overdueCollapsed && (
+            <ul>
+              {overdue.sort(sortTasks).map((t) => (
+                <TaskItem
+                  key={t.id}
+                  task={t}
+                  color={colorOf(projects.find((p) => p.id === t.project_id)?.color)}
+                  showDate
+                  onToggle={(x) => complete.mutate(x)}
+                  onOpen={onOpen}
+                />
+              ))}
+            </ul>
+          )}
         </div>
       )}
 

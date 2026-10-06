@@ -176,7 +176,14 @@ export function App() {
   if (config.isError)
     return (
       <div className="splash">
-        서버에 연결할 수 없습니다. <code>pnpm up</code> 으로 서버를 켜세요.
+        <p>서버에 연결할 수 없습니다. <code>todocal.bat</code> 으로 서버를 켜세요.</p>
+        <button
+          className="primary"
+          style={{ marginTop: "14px", padding: "8px 16px", borderRadius: "8px", cursor: "pointer" }}
+          onClick={() => config.refetch()}
+        >
+          다시 연결 시도
+        </button>
       </div>
     );
   if (!ready)
@@ -287,7 +294,11 @@ export function App() {
           )}
         </main>
 
-        <CommandBar ref={cmd} aiEnabled={Boolean(config.data?.hasAnthropic)} />
+        <CommandBar
+          ref={cmd}
+          aiEnabled={Boolean(config.data?.hasAi)}
+          aiProvider={config.data?.aiProvider}
+        />
       </div>
 
       <DragOverlay dropAnimation={null}>

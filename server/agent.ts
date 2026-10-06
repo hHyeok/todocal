@@ -1,9 +1,10 @@
+import { execFile } from "node:child_process";
+import { createRequire } from "node:module";
+import path from "node:path";
 import Anthropic from "@anthropic-ai/sdk";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
-import { createRequire } from "node:module";
-import path from "node:path";
-import { loadConfig } from "./config.js";
+import { detectAgy, loadConfig } from "./config.js";
 
 // 도구 스키마가 매 요청 입력 토큰이 되므로 캘린더에 필요한 것만 노출한다
 const ALLOWED_TOOLS = new Set([
@@ -72,22 +73,23 @@ export interface AgentResult {
   actions: { tool: string; ok: boolean }[];
 }
 
-export async function runAgent(history: AgentTurn[], now: string, tz: string): Promise<AgentResult> {
-  const cfg = loadConfig();
-  if (!cfg.todoistToken) throw new Error("Todoist 토큰이 없습니다");
-  if (!cfg.anthropicKey) throw new Error("Anthropic API 키가 없습니다");
-  const { client: mcpClient, tools } = await getMcp(cfg.todoistToken);
+async function runAgentClaude(
+  history: AgentTurn[],
+  now: string,
+  tz: string,
+  cfg: ReturnType<typeof loadConfig>,
+  mcpClient: Client,
+  tools: Anthropic.Tool[],
+): Promise<AgentResult> {
   const anthropic = new Anthropic({ apiKey: cfg.anthropicKey });
-
   const messages: Anthropic.Beta.BetaMessageParam[] = history.map((t) => ({ role: t.role, content: t.text }));
-  // 날짜는 매번 바뀌므로 캐시되는 system 대신 마지막 사용자 턴 뒤에 붙인다
   const last = messages[messages.length - 1];
   last.content = `${last.content}\n\n(현재 시각: ${now}, 시간대: ${tz})`;
 
   const actions: AgentResult["actions"] = [];
   for (let i = 0; i < 12; i++) {
     const res = await anthropic.beta.messages.create({
-      model: cfg.model!,
+      model: cfg.model || "claude-opus-5",
       max_tokens: 16000,
       system: [{ type: "text", text: SYSTEM, cache_control: { type: "ephemeral" } }],
       tools,
@@ -129,4 +131,317 @@ export async function runAgent(history: AgentTurn[], now: string, tz: string): P
     messages.push({ role: "user", content: results });
   }
   return { text: "작업이 너무 길어져 중단했습니다.", actions };
+}
+
+function normalizeMcpArgs(tool: string, rawArgs: Record<string, unknown> = {}): Record<string, unknown> {
+  const args = { ...rawArgs };
+  if (tool === "add-tasks") {
+    let rawTasks = args.tasks;
+    if (!Array.isArray(rawTasks)) {
+      rawTasks = [args];
+    }
+    const tasks = (rawTasks as any[]).map((t: any) => {
+      const p = t.priority;
+      let priorityStr: "p1" | "p2" | "p3" | "p4" | undefined;
+      if (typeof p === "string" && /^p[1-4]$/i.test(p)) {
+        priorityStr = p.toLowerCase() as any;
+      } else if (typeof p === "number") {
+        if (p === 4) priorityStr = "p1";
+        else if (p === 3) priorityStr = "p2";
+        else if (p === 2) priorityStr = "p3";
+        else priorityStr = "p4";
+      }
+      const due = t.dueString || t.due_string || t.dueDate || t.due_date || t.due_datetime || t.due;
+      return {
+        content: String(t.content || t.text || t.name || "새 작업"),
+        ...(due ? { dueString: String(due) } : {}),
+        ...(priorityStr ? { priority: priorityStr } : {}),
+        ...(t.projectId || t.project_id ? { projectId: String(t.projectId || t.project_id) } : {}),
+        ...(Array.isArray(t.labels) ? { labels: t.labels } : {}),
+      };
+    });
+    return { tasks };
+  }
+
+  if (tool === "complete-tasks") {
+    const rawIds = args.ids || args.task_ids || args.taskIds || (args.id ? [args.id] : []);
+    const ids = (Array.isArray(rawIds) ? rawIds : [rawIds]).map(String);
+    return { ids };
+  }
+
+  if (tool === "reschedule-tasks") {
+    let rawTasks = args.tasks;
+    if (!Array.isArray(rawTasks) && (args.id || args.task_id)) {
+      rawTasks = [{ id: args.id || args.task_id, date: args.date || args.due_date || args.due_string || args.dueString }];
+    }
+    if (Array.isArray(rawTasks)) {
+      return {
+        tasks: rawTasks.map((t: any) => ({
+          id: String(t.id || t.task_id),
+          date: String(t.date || t.due_date || t.due_string || t.dueString),
+        })),
+      };
+    }
+  }
+
+  return args;
+}
+
+async function executeAction(
+  tool: string,
+  args: Record<string, unknown>,
+  token: string,
+  mcpClient: Client,
+): Promise<boolean> {
+  const normArgs = normalizeMcpArgs(tool, args);
+
+  // 1. MCP 우선 호출
+  try {
+    const out = await mcpClient.callTool({ name: tool, arguments: normArgs });
+    if (!out.isError) return true;
+    console.warn(`[MCP Tool ${tool} Warning]`, JSON.stringify(out.content));
+  } catch (err) {
+    console.warn(`[MCP Tool ${tool} Error]`, err);
+  }
+
+  // 2. 실패 시 Todoist REST API 직접 호출 (안전망)
+  try {
+    if (tool === "add-tasks") {
+      const tasks = (normArgs.tasks as any[]) || [];
+      for (const t of tasks) {
+        const body: Record<string, unknown> = {
+          content: t.content,
+          ...(t.dueString ? { due_string: t.dueString } : {}),
+          ...(t.priority ? { priority: t.priority === "p1" ? 4 : t.priority === "p2" ? 3 : t.priority === "p3" ? 2 : 1 } : {}),
+          ...(t.projectId ? { project_id: t.projectId } : {}),
+          ...(t.labels ? { labels: t.labels } : {}),
+        };
+        const res = await fetch("https://api.todoist.com/api/v1/tasks", {
+          method: "POST",
+          headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        if (!res.ok) {
+          console.error(`[REST add-tasks error ${res.status}]`, await res.text());
+          return false;
+        }
+      }
+      return true;
+    }
+
+    if (tool === "complete-tasks") {
+      const ids = (normArgs.ids as string[]) || [];
+      for (const id of ids) {
+        const res = await fetch(`https://api.todoist.com/api/v1/tasks/${id}/close`, {
+          method: "POST",
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (!res.ok) return false;
+      }
+      return true;
+    }
+
+    if (tool === "delete-object" || tool === "delete-task") {
+      const id = (args.id || args.task_id || (normArgs.ids as string[])?.[0]) as string;
+      if (id) {
+        const res = await fetch(`https://api.todoist.com/api/v1/tasks/${id}`, {
+          method: "DELETE",
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (!res.ok) return false;
+      }
+      return true;
+    }
+  } catch (e) {
+    console.error("[REST Fallback Exception]", e);
+  }
+
+  return false;
+}
+
+async function runAgentAgy(
+  history: AgentTurn[],
+  now: string,
+  tz: string,
+  cfg: ReturnType<typeof loadConfig>,
+  mcpClient: Client,
+): Promise<AgentResult> {
+  const agyPath = detectAgy();
+  if (!agyPath) throw new Error("시스템에 agy (Antigravity CLI)가 설치되어 있지 않습니다.");
+
+  const model = cfg.model || "gemini-3.8-flash-low";
+  const userTurns = history.map((t) => `${t.role === "user" ? "사용자" : "비서"}: ${t.text}`).join("\n");
+  const last = history[history.length - 1];
+
+  const prompt = `너는 Todoist 캘린더 비서다. 사용자의 지시를 실행할 JSON 객체와 간결한 한국어 답변을 생성하라.
+현재: ${now} (${tz})
+
+[도구 포맷]
+- 할 일 추가 (add-tasks): { "tasks": [{ "content": "작업명", "dueString": "자연어 날짜/시간", "priority": "p1"|"p2"|"p3"|"p4" }] } (p1:가장중요, p4:보통)
+- 완료 (complete-tasks): { "ids": ["작업ID"] }
+- 변경 (reschedule-tasks): { "tasks": [{ "id": "작업ID", "date": "YYYY-MM-DD" }] }
+
+출력 규칙: 마크다운 코드블록 없이 순수 JSON 객체 하나만 출력하라:
+{"actions":[{"tool":"add-tasks","args":{"tasks":[{"content":"작업명","dueString":"내일 오후 3시","priority":"p1"}]}}],"reply":"내일 오후 3시 작업을 추가했습니다."}
+
+[대화 기록]
+${userTurns}
+
+[현재 지시]
+${last ? last.text : ""}`;
+
+  const stdout = await new Promise<string>((resolve, reject) => {
+    execFile(
+      agyPath,
+      ["-p", prompt, "--model", model, "--effort", "low", "--dangerously-skip-permissions", "--disable-slash-commands"],
+      { windowsHide: true, maxBuffer: 10 * 1024 * 1024 },
+      (err, out, stderr) => {
+        if (err) return reject(new Error(stderr || err.message));
+        resolve(out);
+      },
+    );
+  });
+
+  let parsed: { actions?: { tool: string; args: Record<string, unknown> }[]; reply?: string };
+  try {
+    let clean = stdout.trim();
+    const jsonMatch = clean.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
+    if (jsonMatch) clean = jsonMatch[1].trim();
+    const startIdx = clean.indexOf("{");
+    const endIdx = clean.lastIndexOf("}");
+    if (startIdx !== -1 && endIdx !== -1) {
+      clean = clean.slice(startIdx, endIdx + 1);
+    }
+    parsed = JSON.parse(clean);
+  } catch {
+    return { text: stdout.trim() || "응답을 처리하지 못했습니다.", actions: [] };
+  }
+
+  const actions: AgentResult["actions"] = [];
+  if (Array.isArray(parsed.actions)) {
+    for (const act of parsed.actions) {
+      const ok = await executeAction(act.tool, act.args, cfg.todoistToken!, mcpClient);
+      actions.push({ tool: act.tool, ok });
+    }
+  }
+
+  return {
+    text: parsed.reply || (actions.length > 0 ? "작업을 완료했습니다." : stdout.trim()),
+    actions,
+  };
+}
+
+async function runAgentGemini(
+  history: AgentTurn[],
+  now: string,
+  tz: string,
+  cfg: ReturnType<typeof loadConfig>,
+  mcpClient: Client,
+): Promise<AgentResult> {
+  const model = cfg.model || "gemini-2.5-flash";
+  const userTurns = history.map((t) => `${t.role === "user" ? "사용자" : "비서"}: ${t.text}`).join("\n");
+  const last = history[history.length - 1];
+
+  const prompt = `너는 Todoist 캘린더 앱 안의 비서다. 사용자의 지시를 Todoist 도구로 실행할 JSON 액션 목록과 간결한 한국어 답변을 생성하라.
+현재 시각: ${now}, 시간대: ${tz}
+
+- 할 일 추가: add-tasks { "tasks": [{ "content": "...", "dueString": "...", "priority": "p1"|"p2"|"p3"|"p4" }] }
+- 완료: complete-tasks { "ids": ["..."] }
+- 일정 변경: reschedule-tasks { "tasks": [{ "id": "...", "date": "YYYY-MM-DD" }] }
+- 답은 한국어로 한두 줄. 무엇을 했는지만 간결하게 말한다.
+
+[대화 기록]
+${userTurns}
+
+[현재 사용자 지시]
+${last ? last.text : ""}`;
+
+  const res = await fetch(
+    `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${cfg.geminiKey}`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        contents: [{ role: "user", parts: [{ text: prompt }] }],
+        generationConfig: {
+          responseMimeType: "application/json",
+          responseSchema: {
+            type: "OBJECT",
+            properties: {
+              actions: {
+                type: "ARRAY",
+                items: {
+                  type: "OBJECT",
+                  properties: {
+                    tool: { type: "STRING" },
+                    args: { type: "OBJECT" },
+                  },
+                  required: ["tool", "args"],
+                },
+              },
+              reply: { type: "STRING" },
+            },
+            required: ["actions", "reply"],
+          },
+        },
+      }),
+    },
+  );
+
+  if (!res.ok) {
+    const err = await res.text();
+    throw new Error(`Gemini API 오류 (${res.status}): ${err}`);
+  }
+
+  const data = (await res.json()) as any;
+  const rawText = data?.candidates?.[0]?.content?.parts?.[0]?.text ?? "{}";
+  const parsed = JSON.parse(rawText);
+
+  const actions: AgentResult["actions"] = [];
+  if (Array.isArray(parsed.actions)) {
+    for (const act of parsed.actions) {
+      const ok = await executeAction(act.tool, act.args, cfg.todoistToken!, mcpClient);
+      actions.push({ tool: act.tool, ok });
+    }
+  }
+
+  return {
+    text: parsed.reply || (actions.length > 0 ? "작업을 완료했습니다." : "완료"),
+    actions,
+  };
+}
+
+export async function runAgent(history: AgentTurn[], now: string, tz: string): Promise<AgentResult> {
+  const cfg = loadConfig();
+  if (!cfg.todoistToken) throw new Error("Todoist 토큰이 없습니다");
+
+  const agyPath = detectAgy();
+  let provider = cfg.aiProvider;
+  if (!provider) {
+    if (cfg.anthropicKey) provider = "claude";
+    else if (agyPath) provider = "agy";
+    else if (cfg.geminiKey) provider = "gemini";
+  }
+
+  if (provider === "agy") {
+    const { client: mcpClient } = await getMcp(cfg.todoistToken);
+    return runAgentAgy(history, now, tz, cfg, mcpClient);
+  }
+
+  if (provider === "gemini" && cfg.geminiKey) {
+    const { client: mcpClient } = await getMcp(cfg.todoistToken);
+    return runAgentGemini(history, now, tz, cfg, mcpClient);
+  }
+
+  if (cfg.anthropicKey) {
+    const { client: mcpClient, tools } = await getMcp(cfg.todoistToken);
+    return runAgentClaude(history, now, tz, cfg, mcpClient, tools);
+  }
+
+  if (agyPath) {
+    const { client: mcpClient } = await getMcp(cfg.todoistToken);
+    return runAgentAgy(history, now, tz, cfg, mcpClient);
+  }
+
+  throw new Error("AI 설정이 되어 있지 않습니다 (Anthropic API 키 또는 agy 설치 필요)");
 }

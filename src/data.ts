@@ -12,7 +12,13 @@ export const keys = {
   completed: (since: string, until: string) => ["completed", since, until] as const,
 };
 
-export const useConfig = () => useQuery({ queryKey: keys.config, queryFn: api.config });
+export const useConfig = () =>
+  useQuery({
+    queryKey: keys.config,
+    queryFn: api.config,
+    retry: 5,
+    retryDelay: (attempt) => Math.min(attempt * 500, 2000),
+  });
 
 export const useTasks = (enabled: boolean) =>
   useQuery({ queryKey: keys.tasks, queryFn: api.tasks, enabled, refetchInterval: 60_000 });

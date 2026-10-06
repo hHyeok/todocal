@@ -13,7 +13,8 @@ export interface CommandBarHandle {
   focus: () => void;
 }
 
-export const CommandBar = forwardRef<CommandBarHandle, { aiEnabled: boolean }>(function CommandBar({ aiEnabled }, ref) {
+export const CommandBar = forwardRef<CommandBarHandle, { aiEnabled: boolean; aiProvider?: string }>(
+  function CommandBar({ aiEnabled, aiProvider }, ref) {
   const qc = useQueryClient();
   const input = useRef<HTMLInputElement>(null);
   const [text, setText] = useState("");
@@ -22,11 +23,14 @@ export const CommandBar = forwardRef<CommandBarHandle, { aiEnabled: boolean }>(f
   const [open, setOpen] = useState(false);
   useImperativeHandle(ref, () => ({ focus: () => input.current?.focus() }));
 
-  const refresh = () => {
-    qc.invalidateQueries({ queryKey: keys.tasks });
-    qc.invalidateQueries({ queryKey: ["completed"] });
-    qc.invalidateQueries({ queryKey: keys.projects });
-    qc.invalidateQueries({ queryKey: keys.labels });
+  const refresh = async () => {
+    await Promise.all([
+      qc.invalidateQueries({ queryKey: keys.tasks }),
+      qc.invalidateQueries({ queryKey: ["completed"] }),
+      qc.invalidateQueries({ queryKey: keys.projects }),
+      qc.invalidateQueries({ queryKey: keys.labels }),
+    ]);
+    await qc.refetchQueries({ queryKey: keys.tasks });
   };
 
   async function submit() {
@@ -38,7 +42,7 @@ export const CommandBar = forwardRef<CommandBarHandle, { aiEnabled: boolean }>(f
       try {
         const t = await api.quickAdd(msg);
         toast(`추가: ${t.content}`);
-        refresh();
+        await refresh();
       } catch (e) {
         toast(`추가 실패: ${e instanceof Error ? e.message : e}`, { error: true });
       } finally {
@@ -53,7 +57,7 @@ export const CommandBar = forwardRef<CommandBarHandle, { aiEnabled: boolean }>(f
       // 대화 맥락은 최근 6턴만 보낸다
       const res = await api.agent(next.slice(-6).map(({ role, text }) => ({ role, text })));
       setTurns([...next, { role: "assistant", text: res.text, actions: res.actions }]);
-      if (res.actions.length) refresh();
+      await refresh();
     } catch (e) {
       setTurns([...next, { role: "assistant", text: `오류: ${e instanceof Error ? e.message : e}` }]);
     } finally {
@@ -66,7 +70,7 @@ export const CommandBar = forwardRef<CommandBarHandle, { aiEnabled: boolean }>(f
       {open && turns.length > 0 && (
         <div className="cmd-log" role="log" aria-live="polite">
           <div className="cmd-log-head">
-            <span>AI 지시</span>
+            <span>{aiProvider === "agy" ? "agy 지시" : "AI 지시"}</span>
             <button className="ghost small" onClick={() => setTurns([])}>
               새 대화
             </button>
@@ -98,7 +102,7 @@ export const CommandBar = forwardRef<CommandBarHandle, { aiEnabled: boolean }>(f
           submit();
         }}
       >
-        <span className="cmd-badge">{aiEnabled ? "AI" : "빠른 추가"}</span>
+        <span className="cmd-badge">{aiEnabled ? (aiProvider === "agy" ? "agy" : "AI") : "빠른 추가"}</span>
         <input
           ref={input}
           value={text}

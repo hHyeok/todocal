@@ -46,6 +46,10 @@ export interface Label {
 export interface AppConfig {
   hasTodoist: boolean;
   hasAnthropic: boolean;
+  hasAgy: boolean;
+  hasGemini: boolean;
+  hasAi: boolean;
+  aiProvider: "claude" | "agy" | "gemini" | "none";
   model: string;
   mock: boolean;
 }
