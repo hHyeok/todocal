@@ -509,6 +509,35 @@ h3 {
   color: var(--text);
   font-weight: 400;
 }
+.group {
+  margin-bottom: 8px;
+  padding: 6px 8px;
+  border-radius: var(--radius);
+  transition: background 0.15s ease, outline 0.15s ease;
+}
+.group.empty {
+  min-height: 44px;
+}
+.group.drop-eligible.empty {
+  outline: 1px dashed var(--border);
+  background: color-mix(in srgb, var(--card) 40%, transparent);
+}
+.group.drop {
+  background: var(--accent-soft) !important;
+  outline: 2px dashed var(--accent) !important;
+}
+.drop-target-hint {
+  padding: 6px 10px;
+  margin: 4px 0;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--accent);
+  background: var(--card);
+  border: 1px dashed var(--accent);
+  border-radius: 8px;
+  text-align: center;
+  list-style: none;
+}
 .group-head {
   display: flex;
   align-items: center;

@@ -19,10 +19,12 @@ import { TaskItem, stripMd } from "./components/TaskItem";
 import { TaskSheet } from "./components/TaskSheet";
 import {
   dismiss,
+  toast,
   useCompleted,
   useComplete,
   useConfig,
   useLabels,
+  useMove,
   useProjects,
   useReschedule,
   useTasks,
@@ -155,6 +157,7 @@ export function App() {
 
   const reschedule = useReschedule();
   const complete = useComplete();
+  const move = useMove();
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 8 } }),
     useSensor(TouchSensor, { activationConstraint: { delay: 300, tolerance: 6 } }),
@@ -169,6 +172,20 @@ export function App() {
     } else if (over.startsWith("day:")) {
       const date = over.slice(4);
       if (dueKey(task) !== date) reschedule.mutate({ task, date });
+    } else if (over.startsWith("project:")) {
+      const [, targetProjectId, targetDay] = over.split(":");
+      const targetProj = projectMap.get(targetProjectId);
+      const projName = targetProj ? (targetProj.inbox_project ? "Inbox" : targetProj.name) : "프로젝트";
+
+      // 1. 카테고리(프로젝트) 변경
+      if (task.project_id !== targetProjectId) {
+        move.mutate({ task, projectId: targetProjectId });
+        toast(`"${stripMd(task.content)}" → ${projName}`);
+      }
+      // 2. 다른 날짜 또는 날짜 없음에서 끌어온 경우 해당 날짜로 이동
+      if (targetDay && dueKey(task) !== targetDay) {
+        reschedule.mutate({ task, date: targetDay });
+      }
     }
   };
 
@@ -279,6 +296,7 @@ export function App() {
               overdue={overdue}
               projects={projects}
               onOpen={(t) => setOpenId(t.id)}
+              draggingTask={dragging}
             />
           </div>
           {inboxOpen && (

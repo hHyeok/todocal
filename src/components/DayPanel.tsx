@@ -1,3 +1,4 @@
+import { useDroppable } from "@dnd-kit/core";
 import { format, parseISO } from "date-fns";
 import { ko } from "date-fns/locale";
 import { useState } from "react";
@@ -14,9 +15,10 @@ interface Props {
   overdue: Task[];
   projects: Project[];
   onOpen: (t: Task) => void;
+  draggingTask?: Task | null;
 }
 
-export function DayPanel({ day, today, open, done, overdue, projects, onOpen }: Props) {
+export function DayPanel({ day, today, open, done, overdue, projects, onOpen, draggingTask }: Props) {
   const complete = useComplete();
   const reopen = useReopen();
   const reschedule = useReschedule();
@@ -138,38 +140,111 @@ export function DayPanel({ day, today, open, done, overdue, projects, onOpen }: 
         const items = roots.filter((t) => t.project_id === p.id).sort(sortTasks);
         const doneItems = showDone ? done.filter((t) => t.project_id === p.id) : [];
         const color = colorOf(p.color);
-        const empty = items.length === 0 && doneItems.length === 0;
         return (
-          <div key={p.id} className={`group${empty ? " empty" : ""}`}>
-            <div className="group-head">
-              <span className="goal" style={{ background: `${color}22`, color }}>
-                <i style={{ background: color }} />
-                {p.inbox_project ? "Inbox" : p.name}
-              </span>
-              <button className="add" aria-label={`${p.name}에 추가`} onClick={() => setAdding(p.id)}>
-                +
-              </button>
-            </div>
-            <ul>
-              {items.map((t) => (
-                <TaskItem
-                  key={t.id}
-                  task={t}
-                  color={color}
-                  subtasks={childrenOf(t.id)}
-                  onToggle={(x) => complete.mutate(x)}
-                  onOpen={onOpen}
-                />
-              ))}
-              {adding === p.id && <InlineAdd day={day} projectId={p.id} onClose={() => setAdding(null)} />}
-              {doneItems.map((t) => (
-                <TaskItem key={t.id} task={t} color={color} done onToggle={(x) => reopen.mutate(x)} onOpen={onOpen} />
-              ))}
-            </ul>
-          </div>
+          <ProjectGroup
+            key={p.id}
+            day={day}
+            project={p}
+            color={color}
+            items={items}
+            doneItems={doneItems}
+            adding={adding === p.id}
+            setAdding={setAdding}
+            childrenOf={childrenOf}
+            complete={complete}
+            reopen={reopen}
+            onOpen={onOpen}
+            isDraggingActive={Boolean(draggingTask)}
+            isCurrentProjectOfDragged={draggingTask?.project_id === p.id}
+          />
         );
       })}
     </section>
+  );
+}
+
+interface ProjectGroupProps {
+  day: string;
+  project: Project;
+  color: string;
+  items: Task[];
+  doneItems: Task[];
+  adding: boolean;
+  setAdding: (id: string | null) => void;
+  childrenOf: (id: string) => Task[];
+  complete: ReturnType<typeof useComplete>;
+  reopen: ReturnType<typeof useReopen>;
+  onOpen: (t: Task) => void;
+  isDraggingActive: boolean;
+  isCurrentProjectOfDragged: boolean;
+}
+
+function ProjectGroup({
+  day,
+  project,
+  color,
+  items,
+  doneItems,
+  adding,
+  setAdding,
+  childrenOf,
+  complete,
+  reopen,
+  onOpen,
+  isDraggingActive,
+  isCurrentProjectOfDragged,
+}: ProjectGroupProps) {
+  const { setNodeRef, isOver } = useDroppable({
+    id: `project:${project.id}:${day}`,
+    data: { type: "project", projectId: project.id, day },
+  });
+
+  const empty = items.length === 0 && doneItems.length === 0;
+  const canDropHere = isDraggingActive && !isCurrentProjectOfDragged;
+
+  return (
+    <div
+      ref={setNodeRef}
+      className={[
+        "group",
+        empty && "empty",
+        isOver && "drop",
+        canDropHere && "drop-eligible",
+      ]
+        .filter(Boolean)
+        .join(" ")}
+    >
+      <div className="group-head">
+        <span className="goal" style={{ background: `${color}22`, color }}>
+          <i style={{ background: color }} />
+          {project.inbox_project ? "Inbox" : project.name}
+        </span>
+        <button className="add" aria-label={`${project.name}에 추가`} onClick={() => setAdding(project.id)}>
+          +
+        </button>
+      </div>
+      <ul>
+        {items.map((t) => (
+          <TaskItem
+            key={t.id}
+            task={t}
+            color={color}
+            subtasks={childrenOf(t.id)}
+            onToggle={(x) => complete.mutate(x)}
+            onOpen={onOpen}
+          />
+        ))}
+        {adding && <InlineAdd day={day} projectId={project.id} onClose={() => setAdding(null)} />}
+        {doneItems.map((t) => (
+          <TaskItem key={t.id} task={t} color={color} done onToggle={(x) => reopen.mutate(x)} onOpen={onOpen} />
+        ))}
+        {isOver && (
+          <li className="drop-target-hint">
+            {isCurrentProjectOfDragged ? "현재 카테고리입니다" : `"${project.name}"(으)로 이동`}
+          </li>
+        )}
+      </ul>
+    </div>
   );
 }
 
