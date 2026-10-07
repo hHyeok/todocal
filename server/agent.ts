@@ -1,4 +1,5 @@
-import { execFile } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
+import fs from "node:fs";
 import { createRequire } from "node:module";
 import path from "node:path";
 import Anthropic from "@anthropic-ai/sdk";
@@ -290,10 +291,29 @@ ${userTurns}
 [현재 지시]
 ${last ? last.text : ""}`;
 
+  const isWin = process.platform === "win32";
+  const silentRunCandidate = path.resolve("server/silent_run.exe");
+  const csSource = path.resolve("server/silent_run.cs");
+  const cscPath = "C:\\Windows\\Microsoft.NET\\Framework64\\v4.0.30319\\csc.exe";
+
+  if (isWin && !fs.existsSync(silentRunCandidate) && fs.existsSync(csSource) && fs.existsSync(cscPath)) {
+    try {
+      execFileSync(cscPath, ["/target:winexe", `/out:${silentRunCandidate}`, csSource], { windowsHide: true });
+    } catch (e) {
+      console.warn("[silent_run compile warning]", e);
+    }
+  }
+
+  const useSilentRun = isWin && fs.existsSync(silentRunCandidate);
+  const bin = useSilentRun ? silentRunCandidate : agyPath;
+  const args = useSilentRun
+    ? [agyPath, "-p", prompt, "--model", model, "--effort", "low", "--dangerously-skip-permissions", "--disable-slash-commands"]
+    : ["-p", prompt, "--model", model, "--effort", "low", "--dangerously-skip-permissions", "--disable-slash-commands"];
+
   const stdout = await new Promise<string>((resolve, reject) => {
     execFile(
-      agyPath,
-      ["-p", prompt, "--model", model, "--effort", "low", "--dangerously-skip-permissions", "--disable-slash-commands"],
+      bin,
+      args,
       { windowsHide: true, maxBuffer: 10 * 1024 * 1024 },
       (err, out, stderr) => {
         if (err) return reject(new Error(stderr || err.message));

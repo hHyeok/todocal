@@ -42,6 +42,7 @@ function startServer() {
     stdio: "inherit",
     env: { ...process.env, TODOCAL_PORT: String(PORT), TODOCAL_OPEN: "0" },
     shell: true,
+    windowsHide: true,
   });
 
   serverProcess.on("error", (err) => {
