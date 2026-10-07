@@ -192,20 +192,22 @@ async function executeAction(
   tool: string,
   args: Record<string, unknown>,
   token: string,
-  mcpClient: Client,
+  mcpClient?: Client,
 ): Promise<boolean> {
   const normArgs = normalizeMcpArgs(tool, args);
 
-  // 1. MCP 우선 호출
-  try {
-    const out = await mcpClient.callTool({ name: tool, arguments: normArgs });
-    if (!out.isError) return true;
-    console.warn(`[MCP Tool ${tool} Warning]`, JSON.stringify(out.content));
-  } catch (err) {
-    console.warn(`[MCP Tool ${tool} Error]`, err);
+  // 1. MCP 클라이언트가 있는 경우에만 호출 시도
+  if (mcpClient) {
+    try {
+      const out = await mcpClient.callTool({ name: tool, arguments: normArgs });
+      if (!out.isError) return true;
+      console.warn(`[MCP Tool ${tool} Warning]`, JSON.stringify(out.content));
+    } catch (err) {
+      console.warn(`[MCP Tool ${tool} Error]`, err);
+    }
   }
 
-  // 2. 실패 시 Todoist REST API 직접 호출 (안전망)
+  // 2. Todoist REST API 직접 호출 (무프로세스 / 빠른 응답)
   try {
     if (tool === "add-tasks") {
       const tasks = (normArgs.tasks as any[]) || [];
@@ -213,6 +215,7 @@ async function executeAction(
         const body: Record<string, unknown> = {
           content: t.content,
           ...(t.dueString ? { due_string: t.dueString } : {}),
+          ...(t.dueDate ? { due_date: t.dueDate } : {}),
           ...(t.priority ? { priority: t.priority === "p1" ? 4 : t.priority === "p2" ? 3 : t.priority === "p3" ? 2 : 1 } : {}),
           ...(t.projectId ? { project_id: t.projectId } : {}),
           ...(t.labels ? { labels: t.labels } : {}),
@@ -242,6 +245,39 @@ async function executeAction(
       return true;
     }
 
+    if (tool === "uncomplete-tasks") {
+      const ids = (normArgs.ids as string[]) || [];
+      for (const id of ids) {
+        const res = await fetch(`https://api.todoist.com/api/v1/tasks/${id}/reopen`, {
+          method: "POST",
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (!res.ok) return false;
+      }
+      return true;
+    }
+
+    if (tool === "reschedule-tasks" || tool === "update-tasks") {
+      const tasks = (normArgs.tasks as any[]) || [];
+      for (const t of tasks) {
+        const id = t.id || t.taskId;
+        if (!id) continue;
+        const body: Record<string, unknown> = {};
+        if (t.content) body.content = t.content;
+        if (t.dueString) body.due_string = t.dueString;
+        if (t.dueDate || t.date) body.due_date = t.dueDate || t.date;
+        if (t.priority) body.priority = t.priority === "p1" ? 4 : t.priority === "p2" ? 3 : t.priority === "p3" ? 2 : 1;
+        if (t.labels) body.labels = t.labels;
+        const res = await fetch(`https://api.todoist.com/api/v1/tasks/${id}`, {
+          method: "POST",
+          headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        if (!res.ok) return false;
+      }
+      return true;
+    }
+
     if (tool === "delete-object" || tool === "delete-task") {
       const id = (args.id || args.task_id || (normArgs.ids as string[])?.[0]) as string;
       if (id) {
@@ -254,7 +290,7 @@ async function executeAction(
       return true;
     }
   } catch (e) {
-    console.error("[REST Fallback Exception]", e);
+    console.error("[REST Execution Exception]", e);
   }
 
   return false;
@@ -265,7 +301,6 @@ async function runAgentAgy(
   now: string,
   tz: string,
   cfg: ReturnType<typeof loadConfig>,
-  mcpClient: Client,
 ): Promise<AgentResult> {
   const agyPath = detectAgy();
   if (!agyPath) throw new Error("시스템에 agy (Antigravity CLI)가 설치되어 있지 않습니다.");
@@ -340,7 +375,7 @@ ${last ? last.text : ""}`;
   const actions: AgentResult["actions"] = [];
   if (Array.isArray(parsed.actions)) {
     for (const act of parsed.actions) {
-      const ok = await executeAction(act.tool, act.args, cfg.todoistToken!, mcpClient);
+      const ok = await executeAction(act.tool, act.args, cfg.todoistToken!);
       actions.push({ tool: act.tool, ok });
     }
   }
@@ -356,7 +391,6 @@ async function runAgentGemini(
   now: string,
   tz: string,
   cfg: ReturnType<typeof loadConfig>,
-  mcpClient: Client,
 ): Promise<AgentResult> {
   const model = cfg.model || "gemini-2.5-flash";
   const userTurns = history.map((t) => `${t.role === "user" ? "사용자" : "비서"}: ${t.text}`).join("\n");
@@ -420,7 +454,7 @@ ${last ? last.text : ""}`;
   const actions: AgentResult["actions"] = [];
   if (Array.isArray(parsed.actions)) {
     for (const act of parsed.actions) {
-      const ok = await executeAction(act.tool, act.args, cfg.todoistToken!, mcpClient);
+      const ok = await executeAction(act.tool, act.args, cfg.todoistToken!);
       actions.push({ tool: act.tool, ok });
     }
   }
@@ -444,13 +478,11 @@ export async function runAgent(history: AgentTurn[], now: string, tz: string): P
   }
 
   if (provider === "agy") {
-    const { client: mcpClient } = await getMcp(cfg.todoistToken);
-    return runAgentAgy(history, now, tz, cfg, mcpClient);
+    return runAgentAgy(history, now, tz, cfg);
   }
 
   if (provider === "gemini" && cfg.geminiKey) {
-    const { client: mcpClient } = await getMcp(cfg.todoistToken);
-    return runAgentGemini(history, now, tz, cfg, mcpClient);
+    return runAgentGemini(history, now, tz, cfg);
   }
 
   if (cfg.anthropicKey) {
@@ -459,8 +491,7 @@ export async function runAgent(history: AgentTurn[], now: string, tz: string): P
   }
 
   if (agyPath) {
-    const { client: mcpClient } = await getMcp(cfg.todoistToken);
-    return runAgentAgy(history, now, tz, cfg, mcpClient);
+    return runAgentAgy(history, now, tz, cfg);
   }
 
   throw new Error("AI 설정이 되어 있지 않습니다 (Anthropic API 키 또는 agy 설치 필요)");

@@ -54,11 +54,13 @@ class Program {
                 UseShellExecute = false,
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
+                RedirectStandardInput = true,
                 StandardOutputEncoding = Encoding.UTF8,
                 StandardErrorEncoding = Encoding.UTF8
             };
 
             var p = Process.Start(psi);
+            p.StandardInput.Close();
             string outText = p.StandardOutput.ReadToEnd();
             string errText = p.StandardError.ReadToEnd();
             p.WaitForExit();
