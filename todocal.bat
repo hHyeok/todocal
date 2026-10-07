@@ -20,6 +20,7 @@ if not exist dist (
 )
 
 set TODOCAL_OPEN=1
+set NODE_TLS_REJECT_UNAUTHORIZED=0
 
 echo.
 echo ===================================================

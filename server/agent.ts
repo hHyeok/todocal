@@ -1,3 +1,5 @@
+process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
+
 import { execFile, execFileSync } from "node:child_process";
 import fs from "node:fs";
 import { createRequire } from "node:module";
@@ -134,6 +136,90 @@ async function runAgentClaude(
   return { text: "작업이 너무 길어져 중단했습니다.", actions };
 }
 
+export interface TodoistProject {
+  id: string;
+  name: string;
+  is_inbox_project?: boolean;
+}
+
+let cachedProjects: { token: string; projects: TodoistProject[]; expiry: number } | null = null;
+
+export async function getProjects(token: string): Promise<TodoistProject[]> {
+  const now = Date.now();
+  if (cachedProjects && cachedProjects.token === token && cachedProjects.expiry > now) {
+    return cachedProjects.projects;
+  }
+  try {
+    const res = await fetch("https://api.todoist.com/api/v1/projects", {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!res.ok) return [];
+    const data = (await res.json()) as any;
+    const list: TodoistProject[] = (Array.isArray(data) ? data : data.results || []).map((p: any) => ({
+      id: String(p.id),
+      name: String(p.name),
+      is_inbox_project: Boolean(p.is_inbox_project || p.inbox_project),
+    }));
+    cachedProjects = { token, projects: list, expiry: now + 60_000 };
+    return list;
+  } catch (err) {
+    console.warn("[getProjects error]", err);
+    return [];
+  }
+}
+
+export function resolveProjectId(
+  rawProject: unknown,
+  content: string,
+  projects: TodoistProject[],
+): string | undefined {
+  if (typeof rawProject === "string" && rawProject.trim()) {
+    const pStr = rawProject.trim();
+    const pStrLower = pStr.toLowerCase();
+    // 1. 정확한 ID 일치
+    const byId = projects.find((p) => p.id === pStr);
+    if (byId) return byId.id;
+    // 2. 정확한 이름 일치
+    const byName = projects.find((p) => p.name.toLowerCase() === pStrLower);
+    if (byName) return byName.id;
+    // 3. 부분 일치 (예: "회사일" -> "회사", "공부하기" -> "공부", "회사" -> "회사")
+    const byPartial = projects.find(
+      (p) => !p.is_inbox_project && (pStrLower.includes(p.name.toLowerCase()) || p.name.toLowerCase().includes(pStrLower)),
+    );
+    if (byPartial) return byPartial.id;
+  }
+
+  // 4. 모델이 projectId를 명시하지 않은 경우, 작업 내용(content)에서 프로젝트 키워드 매핑
+  if (content && typeof content === "string") {
+    const lower = content.toLowerCase();
+    for (const p of projects) {
+      if (p.is_inbox_project) continue;
+      if (lower.includes(p.name.toLowerCase())) {
+        return p.id;
+      }
+    }
+    // 동의어 매핑
+    if (lower.includes("회사") || lower.includes("업무") || lower.includes("출근") || lower.includes("직장") || lower.includes("회의") || lower.includes("보고서")) {
+      const companyProj = projects.find((p) => p.name.includes("회사"));
+      if (companyProj) return companyProj.id;
+    }
+    if (lower.includes("공부") || lower.includes("과제") || lower.includes("강의") || lower.includes("시험") || lower.includes("학습")) {
+      const studyProj = projects.find((p) => p.name.includes("공부"));
+      if (studyProj) return studyProj.id;
+    }
+    if (lower.includes("개발") || lower.includes("코딩") || lower.includes("배포") || lower.includes("깃") || lower.includes("버그")) {
+      const devProj = projects.find((p) => p.name.includes("개발"));
+      if (devProj) return devProj.id;
+    }
+    if (lower.includes("개인") || lower.includes("병원") || lower.includes("치과") || lower.includes("장보기") || lower.includes("청소") || lower.includes("집안일")) {
+      const personalProj = projects.find((p) => p.name.includes("개인"));
+      if (personalProj) return personalProj.id;
+    }
+  }
+
+  return undefined;
+}
+
 function normalizeMcpArgs(tool: string, rawArgs: Record<string, unknown> = {}): Record<string, unknown> {
   const args = { ...rawArgs };
   if (tool === "add-tasks") {
@@ -153,11 +239,12 @@ function normalizeMcpArgs(tool: string, rawArgs: Record<string, unknown> = {}): 
         else priorityStr = "p4";
       }
       const due = t.dueString || t.due_string || t.dueDate || t.due_date || t.due_datetime || t.due;
+      const proj = t.projectId || t.project_id || t.projectName || t.project || t.category;
       return {
         content: String(t.content || t.text || t.name || "새 작업"),
         ...(due ? { dueString: String(due) } : {}),
         ...(priorityStr ? { priority: priorityStr } : {}),
-        ...(t.projectId || t.project_id ? { projectId: String(t.projectId || t.project_id) } : {}),
+        ...(proj ? { projectId: String(proj) } : {}),
         ...(Array.isArray(t.labels) ? { labels: t.labels } : {}),
       };
     });
@@ -192,6 +279,7 @@ async function executeAction(
   tool: string,
   args: Record<string, unknown>,
   token: string,
+  projects: TodoistProject[],
   mcpClient?: Client,
 ): Promise<boolean> {
   const normArgs = normalizeMcpArgs(tool, args);
@@ -212,12 +300,14 @@ async function executeAction(
     if (tool === "add-tasks") {
       const tasks = (normArgs.tasks as any[]) || [];
       for (const t of tasks) {
+        const rawProj = t.projectId || t.project_id || t.projectName || t.project || t.category;
+        const resolvedProjId = resolveProjectId(rawProj, t.content, projects);
         const body: Record<string, unknown> = {
           content: t.content,
           ...(t.dueString ? { due_string: t.dueString } : {}),
           ...(t.dueDate ? { due_date: t.dueDate } : {}),
           ...(t.priority ? { priority: t.priority === "p1" ? 4 : t.priority === "p2" ? 3 : t.priority === "p3" ? 2 : 1 } : {}),
-          ...(t.projectId ? { project_id: t.projectId } : {}),
+          ...(resolvedProjId ? { project_id: resolvedProjId } : {}),
           ...(t.labels ? { labels: t.labels } : {}),
         };
         const res = await fetch("https://api.todoist.com/api/v1/tasks", {
@@ -268,12 +358,43 @@ async function executeAction(
         if (t.dueDate || t.date) body.due_date = t.dueDate || t.date;
         if (t.priority) body.priority = t.priority === "p1" ? 4 : t.priority === "p2" ? 3 : t.priority === "p3" ? 2 : 1;
         if (t.labels) body.labels = t.labels;
-        const res = await fetch(`https://api.todoist.com/api/v1/tasks/${id}`, {
-          method: "POST",
-          headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-          body: JSON.stringify(body),
-        });
-        if (!res.ok) return false;
+        if (Object.keys(body).length > 0) {
+          const res = await fetch(`https://api.todoist.com/api/v1/tasks/${id}`, {
+            method: "POST",
+            headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+            body: JSON.stringify(body),
+          });
+          if (!res.ok) return false;
+        }
+
+        const rawProj = t.projectId || t.project_id || t.projectName || t.project || t.category;
+        const resolvedProjId = resolveProjectId(rawProj, t.content || "", projects);
+        if (resolvedProjId) {
+          await fetch(`https://api.todoist.com/api/v1/tasks/${id}/move`, {
+            method: "POST",
+            headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+            body: JSON.stringify({ project_id: resolvedProjId }),
+          }).catch((err) => console.warn("[move task error]", err));
+        }
+      }
+      return true;
+    }
+
+    if (tool === "move-task" || tool === "move-tasks") {
+      const tasks = (normArgs.tasks as any[]) || [{ id: args.id || args.task_id, projectId: args.projectId || args.project_id || args.projectName || args.project || args.category }];
+      for (const t of tasks) {
+        const id = t.id || t.taskId;
+        if (!id) continue;
+        const rawProj = t.projectId || t.project_id || t.projectName || t.project || t.category;
+        const resolvedProjId = resolveProjectId(rawProj, "", projects);
+        if (resolvedProjId) {
+          const res = await fetch(`https://api.todoist.com/api/v1/tasks/${id}/move`, {
+            method: "POST",
+            headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+            body: JSON.stringify({ project_id: resolvedProjId }),
+          });
+          if (!res.ok) return false;
+        }
       }
       return true;
     }
@@ -305,20 +426,37 @@ async function runAgentAgy(
   const agyPath = detectAgy();
   if (!agyPath) throw new Error("시스템에 agy (Antigravity CLI)가 설치되어 있지 않습니다.");
 
+  const projects = await getProjects(cfg.todoistToken!);
+  const projectListStr = projects.length > 0
+    ? projects.map((p) => `- ${p.name}${p.is_inbox_project ? " (기본 Inbox)" : ""} (ID: ${p.id})`).join("\n")
+    : "- Inbox (기본값)";
+
   const model = cfg.model || "gemini-3.8-flash-low";
   const userTurns = history.map((t) => `${t.role === "user" ? "사용자" : "비서"}: ${t.text}`).join("\n");
   const last = history[history.length - 1];
 
-  const prompt = `너는 Todoist 캘린더 비서다. 사용자의 지시를 실행할 JSON 객체와 간결한 한국어 답변을 생성하라.
-현재: ${now} (${tz})
+  const prompt = `너는 Todoist 캘린더 비서다. 사용자의 지시를 분석하여 실행할 도구(JSON 객체)와 간결한 한국어 답변을 생성하라.
+현재 시각: ${now} (${tz})
+
+[사용자의 프로젝트(카테고리) 목록]
+${projectListStr}
 
 [도구 포맷]
-- 할 일 추가 (add-tasks): { "tasks": [{ "content": "작업명", "dueString": "자연어 날짜/시간", "priority": "p1"|"p2"|"p3"|"p4" }] } (p1:가장중요, p4:보통)
+- 할 일 추가 (add-tasks): { "tasks": [{ "content": "작업명", "dueString": "자연어 날짜/시간", "priority": "p1"|"p2"|"p3"|"p4", "projectId": "프로젝트ID" }] }
 - 완료 (complete-tasks): { "ids": ["작업ID"] }
-- 변경 (reschedule-tasks): { "tasks": [{ "id": "작업ID", "date": "YYYY-MM-DD" }] }
+- 변경 (reschedule-tasks 또는 update-tasks): { "tasks": [{ "id": "작업ID", "date": "YYYY-MM-DD", "projectId": "프로젝트ID" }] }
+- 카테고리 이동 (move-task): { "id": "작업ID", "projectId": "프로젝트ID" }
 
-출력 규칙: 마크다운 코드블록 없이 순수 JSON 객체 하나만 출력하라:
-{"actions":[{"tool":"add-tasks","args":{"tasks":[{"content":"작업명","dueString":"내일 오후 3시","priority":"p1"}]}}],"reply":"내일 오후 3시 작업을 추가했습니다."}
+[필수 규칙]
+1. 프로젝트/카테고리 분류:
+   - 사용자가 "회사", "회사일", "업무", "보고서", "출근", "회의", "직장" 등을 언급하거나 특정 카테고리가 연상되는 작업을 지시하면, 반드시 위 목록에서 가장 일치하는 프로젝트의 ID를 찾아 projectId에 지정하라!
+   - "공부", "강의", "독서" 등은 '공부' 프로젝트, "개발", "코딩", "배포" 등은 '개발' 프로젝트, "개인", "병원", "집안일" 등은 '개인' 프로젝트의 ID를 projectId에 지정하라.
+   - 특정 프로젝트 언급이 없으면 projectId를 생략하거나 기본 Inbox로 지정한다.
+2. 할 일 명칭(content) 정제:
+   - "추가해줘", "등록해줘", "해줘" 같은 어미는 제거하고 순수한 할 일 명칭만 간결하게 남긴다. (예: "오늘 회사일로 보고서 작성하기 추가해줘" -> content: "보고서 작성하기")
+3. 출력 형식:
+   - 마크다운 코드블록 없이 순수 JSON 객체 하나만 출력하라:
+   {"actions":[{"tool":"add-tasks","args":{"tasks":[{"content":"보고서 작성하기","dueString":"오늘","priority":"p2","projectId":"${projects.find(p => p.name.includes("회사"))?.id || ""}"}]}}],"reply":"오늘 회사 프로젝트에 '보고서 작성하기' 일정을 추가했습니다."}
 
 [대화 기록]
 ${userTurns}
@@ -375,7 +513,7 @@ ${last ? last.text : ""}`;
   const actions: AgentResult["actions"] = [];
   if (Array.isArray(parsed.actions)) {
     for (const act of parsed.actions) {
-      const ok = await executeAction(act.tool, act.args, cfg.todoistToken!);
+      const ok = await executeAction(act.tool, act.args, cfg.todoistToken!, projects);
       actions.push({ tool: act.tool, ok });
     }
   }
@@ -393,15 +531,25 @@ async function runAgentGemini(
   cfg: ReturnType<typeof loadConfig>,
 ): Promise<AgentResult> {
   const model = cfg.model || "gemini-2.5-flash";
+  const projects = await getProjects(cfg.todoistToken!);
+  const projectListStr = projects.length > 0
+    ? projects.map((p) => `- ${p.name}${p.is_inbox_project ? " (기본 Inbox)" : ""} (ID: ${p.id})`).join("\n")
+    : "- Inbox (기본값)";
+
   const userTurns = history.map((t) => `${t.role === "user" ? "사용자" : "비서"}: ${t.text}`).join("\n");
   const last = history[history.length - 1];
 
   const prompt = `너는 Todoist 캘린더 앱 안의 비서다. 사용자의 지시를 Todoist 도구로 실행할 JSON 액션 목록과 간결한 한국어 답변을 생성하라.
 현재 시각: ${now}, 시간대: ${tz}
 
-- 할 일 추가: add-tasks { "tasks": [{ "content": "...", "dueString": "...", "priority": "p1"|"p2"|"p3"|"p4" }] }
+[사용자의 프로젝트(카테고리) 목록]
+${projectListStr}
+
+- 할 일 추가: add-tasks { "tasks": [{ "content": "작업명", "dueString": "...", "priority": "p1"|"p2"|"p3"|"p4", "projectId": "프로젝트ID" }] }
 - 완료: complete-tasks { "ids": ["..."] }
-- 일정 변경: reschedule-tasks { "tasks": [{ "id": "...", "date": "YYYY-MM-DD" }] }
+- 일정/프로젝트 변경: reschedule-tasks { "tasks": [{ "id": "...", "date": "YYYY-MM-DD", "projectId": "프로젝트ID" }] }
+- 카테고리 매핑: 사용자가 "회사", "업무", "보고서" 등을 언급하면 반드시 '회사' 프로젝트의 ID를 projectId에 지정한다.
+- 작업명 정제: "추가해줘" 등의 명령어는 빼고 실제 할 일만 작성한다 (예: "보고서 작성하기").
 - 답은 한국어로 한두 줄. 무엇을 했는지만 간결하게 말한다.
 
 [대화 기록]
@@ -454,7 +602,7 @@ ${last ? last.text : ""}`;
   const actions: AgentResult["actions"] = [];
   if (Array.isArray(parsed.actions)) {
     for (const act of parsed.actions) {
-      const ok = await executeAction(act.tool, act.args, cfg.todoistToken!);
+      const ok = await executeAction(act.tool, act.args, cfg.todoistToken!, projects);
       actions.push({ tool: act.tool, ok });
     }
   }
