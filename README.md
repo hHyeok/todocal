@@ -8,6 +8,10 @@ Todoist 캘린더 뷰 대체 앱. TodoMate 스타일 월/주 캘린더 + Todoist
 - **데스크탑 앱 (Electron + 윈도우 네이티브 푸시 알림)**:
   - `todocal-desktop.bat`: 독립형 데스크탑 창, 트레이 최소화(백그라운드 상주), 윈도우 네이티브 토스트 알림
   - `.\todocal-desktop.ps1`: PowerShell용 데스크탑 앱 실행 스크립트
+  - `todocal-desktop-hidden.vbs`: 터미널 창 없이 앱만 실행 (Windows)
+  - `install-startup.ps1`: Windows 시작 프로그램에 등록
+  - `./todocal-desktop-mac.sh`: macOS 데스크탑 앱 실행
+  - `./install-startup-mac.sh`: macOS 로그인 시 자동 실행 등록 (LaunchAgent, 터미널 없이 실행)
 - **웹 브라우저 버전 (기존 웹 유지)**:
   - `todocal.bat`: 의존성 자동 확인/설치, 빌드, 서버 실행 후 브라우저 자동 오픈 (`http://127.0.0.1:5180`)
   - `todocal-mock.bat`: Todoist API 토큰 없이 목업 모드로 즉시 실행
