@@ -34,16 +34,20 @@ async function isServerRunning() {
 function startServer() {
   const rootDir = path.resolve(__dirname, "..");
   const isWin = process.platform === "win32";
-  const cmd = isWin ? "cmd.exe" : "pnpm";
-  const args = isWin ? ["/c", "pnpm", "start"] : ["start"];
+  const env = { ...process.env, PORT: String(PORT), TODOCAL_PORT: String(PORT), TODOCAL_OPEN: "0" };
+  const built = path.join(rootDir, "server-dist", "index.mjs");
+  const tsxCli = path.join(rootDir, "node_modules", "tsx", "dist", "cli.mjs");
+  const direct = fs.existsSync(built) ? [built] : fs.existsSync(tsxCli) ? [tsxCli, "server/index.ts"] : null;
 
-  serverProcess = spawn(cmd, args, {
-    cwd: rootDir,
-    stdio: "inherit",
-    env: { ...process.env, TODOCAL_PORT: String(PORT), TODOCAL_OPEN: "0" },
-    shell: true,
-    windowsHide: true,
-  });
+  serverProcess = direct
+    ? spawn("node", direct, { cwd: rootDir, stdio: "inherit", env, windowsHide: true })
+    : spawn(isWin ? "cmd.exe" : "pnpm", isWin ? ["/c", "pnpm", "start"] : ["start"], {
+        cwd: rootDir,
+        stdio: "inherit",
+        env,
+        shell: true,
+        windowsHide: true,
+      });
 
   serverProcess.on("error", (err) => {
     console.error("[Electron Server Spawn Error]", err);
@@ -181,6 +185,17 @@ ipcMain.handle("get-env", () => {
     version: process.versions.electron,
   };
 });
+
+if (!app.requestSingleInstanceLock()) {
+  app.quit();
+} else {
+  app.on("second-instance", () => {
+    if (mainWindow) {
+      mainWindow.show();
+      mainWindow.focus();
+    }
+  });
+}
 
 app.whenReady().then(async () => {
   const alreadyRunning = await isServerRunning();

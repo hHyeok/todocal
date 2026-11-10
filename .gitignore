@@ -1,5 +1,6 @@
 node_modules
 dist
+server-dist
 dev-dist
 .data
 .env
